@@ -1,0 +1,34 @@
+if (isset($_GET['action'])) {
+    header('Content-Type: application/json');
+    $action = $_GET['action'];
+    if ($action == 'random') {
+        list($r,$g,$b) = randomRGB();
+        echo json_encode(['r'=>$r,'g'=>$g,'b'=>$b]);
+        exit;
+    }
+    if ($action == 'save') {
+        $color = $_GET['color'];
+        list($r,$g,$b) = hexToRgb($color);
+        list($h,$s,$l) = rgbToHsl($r,$g,$b);
+        saveHistoryEntry([
+            'date' => date('c'),
+            'color' => $color,
+            'rgb' => "($r,$g,$b)",
+            'hsl' => "(".round($h,1)."°, ".round($s,1)."%, ".round($l,1)."%)"
+        ]);
+        echo json_encode(['status'=>'ok']);
+        exit;
+    }
+    if ($action == 'history') {
+        echo json_encode(loadHistory());
+        exit;
+    }
+    if ($action == 'palette') {
+        $scheme = $_GET['scheme'];
+        $base = randomRGB();
+        $colors = generatePalette($base, $scheme, 5);
+        $hexColors = array_map(function($c) { list($r,$g,$b)=$c; return rgbToHex($r,$g,$b); }, $colors);
+        echo json_encode(['colors'=>$hexColors]);
+        exit;
+    }
+}
