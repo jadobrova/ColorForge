@@ -1,0 +1,364 @@
+#!/usr/bin/env python3
+# color_generator.py - Генератор случайных цветов на Python (CLI + Tkinter GUI)
+"""
+Поддерживает: HEX, RGB, HSL, палитры, историю, экспорт.
+"""
+import sys
+import random
+import json
+import argparse
+from datetime import datetime
+from typing import Tuple, List, Dict, Optional
+import math
+import os
+
+try:
+    import tkinter as tk
+    from tkinter import ttk, filedialog, messagebox, scrolledtext
+    GUI_AVAILABLE = True
+except ImportError:
+    GUI_AVAILABLE = False
+
+# ========== ОСНОВНЫЕ ФУНКЦИИ ==========
+def random_rgb() -> Tuple[int, int, int]:
+    """Генерирует случайный RGB цвет."""
+    return (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
+
+def rgb_to_hex(r: int, g: int, b: int) -> str:
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+def hex_to_rgb(hex_str: str) -> Tuple[int, int, int]:
+    hex_str = hex_str.lstrip('#')
+    if len(hex_str) == 3:
+        hex_str = ''.join([c*2 for c in hex_str])
+    return (int(hex_str[0:2], 16), int(hex_str[2:4], 16), int(hex_str[4:6], 16))
+
+def rgb_to_hsl(r: int, g: int, b: int) -> Tuple[float, float, float]:
+    """Возвращает (h, s, l) где h в градусах 0-360, s и l в процентах 0-100."""
+    r_norm = r / 255.0
+    g_norm = g / 255.0
+    b_norm = b / 255.0
+    max_c = max(r_norm, g_norm, b_norm)
+    min_c = min(r_norm, g_norm, b_norm)
+    l = (max_c + min_c) / 2
+    if max_c == min_c:
+        h = 0.0
+        s = 0.0
+    else:
+        d = max_c - min_c
+        s = d / (1 - abs(2*l - 1))
+        if max_c == r_norm:
+            h = (g_norm - b_norm) / d % 6
+        elif max_c == g_norm:
+            h = (b_norm - r_norm) / d + 2
+        else:
+            h = (r_norm - g_norm) / d + 4
+        h *= 60
+        if h < 0:
+            h += 360
+    return (h, s * 100, l * 100)
+
+def hsl_to_rgb(h: float, s: float, l: float) -> Tuple[int, int, int]:
+    """h в градусах (0-360), s и l в процентах (0-100)."""
+    h = h % 360
+    s = s / 100.0
+    l = l / 100.0
+    c = (1 - abs(2*l - 1)) * s
+    x = c * (1 - abs((h / 60) % 2 - 1))
+    m = l - c/2
+    if h < 60:
+        r, g, b = c, x, 0
+    elif h < 120:
+        r, g, b = x, c, 0
+    elif h < 180:
+        r, g, b = 0, c, x
+    elif h < 240:
+        r, g, b = 0, x, c
+    elif h < 300:
+        r, g, b = x, 0, c
+    else:
+        r, g, b = c, 0, x
+    return (int((r+m)*255), int((g+m)*255), int((b+m)*255))
+
+# ========== ПАЛИТРЫ ==========
+def generate_monochromatic(r: int, g: int, b: int, count: int = 5) -> List[Tuple[int, int, int]]:
+    """Генерирует монохромную палитру (изменение яркости)."""
+    h, s, l = rgb_to_hsl(r, g, b)
+    colors = []
+    for i in range(count):
+        factor = i / (count - 1) if count > 1 else 0.5
+        new_l = max(10, min(90, l * (0.5 + factor)))
+        colors.append(hsl_to_rgb(h, s, new_l))
+    return colors
+
+def generate_analogous(r: int, g: int, b: int, count: int = 5) -> List[Tuple[int, int, int]]:
+    """Аналоговая палитра (соседние оттенки)."""
+    h, s, l = rgb_to_hsl(r, g, b)
+    colors = []
+    step = 30 / (count - 1) if count > 1 else 0
+    for i in range(count):
+        new_h = (h - 30 + i * step) % 360
+        colors.append(hsl_to_rgb(new_h, s, l))
+    return colors
+
+def generate_complementary(r: int, g: int, b: int) -> List[Tuple[int, int, int]]:
+    """Комплементарная пара (основной + противоположный)."""
+    h, s, l = rgb_to_hsl(r, g, b)
+    comp_h = (h + 180) % 360
+    return [(r, g, b), hsl_to_rgb(comp_h, s, l)]
+
+def generate_triad(r: int, g: int, b: int) -> List[Tuple[int, int, int]]:
+    """Триадная палитра (3 цвета через 120°)."""
+    h, s, l = rgb_to_hsl(r, g, b)
+    colors = []
+    for i in range(3):
+        new_h = (h + i * 120) % 360
+        colors.append(hsl_to_rgb(new_h, s, l))
+    return colors
+
+PALETTE_FUNCS = {
+    'mono': generate_monochromatic,
+    'analog': generate_analogous,
+    'comp': generate_complementary,
+    'triad': generate_triad,
+}
+
+# ========== ИСТОРИЯ ==========
+HISTORY_FILE = "color_history.json"
+
+def load_history() -> List[Dict]:
+    if os.path.exists(HISTORY_FILE):
+        try:
+            with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except:
+            return []
+    return []
+
+def save_history(history: List[Dict]):
+    with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
+        json.dump(history, f, indent=2, ensure_ascii=False)
+
+def add_to_history(color_data: Dict):
+    history = load_history()
+    history.append(color_data)
+    if len(history) > 100:  # ограничим
+        history = history[-100:]
+    save_history(history)
+
+# ========== ЭКСПОРТ ==========
+def export_css(colors: List[Tuple[int, int, int]], filename: str):
+    with open(filename, 'w', encoding='utf-8') as f:
+        f.write(":root {\n")
+        for i, (r, g, b) in enumerate(colors):
+            hex_color = rgb_to_hex(r, g, b)
+            f.write(f"  --color-{i+1}: {hex_color};\n")
+        f.write("}\n")
+
+def export_json(colors: List[Tuple[int, int, int]], filename: str):
+    data = [{"r": r, "g": g, "b": b, "hex": rgb_to_hex(r, g, b)} for r, g, b in colors]
+    with open(filename, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+def export_text(colors: List[Tuple[int, int, int]], filename: str):
+    with open(filename, 'w', encoding='utf-8') as f:
+        for r, g, b in colors:
+            f.write(f"RGB({r},{g},{b})  {rgb_to_hex(r, g, b)}\n")
+
+# ========== CLI ==========
+def cli():
+    parser = argparse.ArgumentParser(description="Генератор случайных цветов")
+    parser.add_argument("--hex", action="store_true", help="Вывести HEX")
+    parser.add_argument("--rgb", action="store_true", help="Вывести RGB")
+    parser.add_argument("--hsl", action="store_true", help="Вывести HSL")
+    parser.add_argument("--palette", choices=['mono','analog','comp','triad'], help="Тип палитры")
+    parser.add_argument("--count", type=int, default=5, help="Количество цветов в палитре")
+    parser.add_argument("--export", choices=['css','json','txt'], help="Экспортировать палитру")
+    parser.add_argument("--output", help="Имя файла для экспорта")
+    parser.add_argument("--history", action="store_true", help="Показать историю")
+    parser.add_argument("--gui", action="store_true", help="Запустить GUI")
+    parser.add_argument("--seed", type=int, help="Seed для воспроизводимости")
+    args = parser.parse_args()
+
+    if args.seed is not None:
+        random.seed(args.seed)
+
+    if args.gui and GUI_AVAILABLE:
+        root = tk.Tk()
+        app = ColorGeneratorGUI(root)
+        root.mainloop()
+        return
+
+    if args.history:
+        history = load_history()
+        if not history:
+            print("История пуста.")
+        else:
+            print("\n📋 ИСТОРИЯ ЦВЕТОВ")
+            for entry in history[-10:]:
+                print(f"{entry['date']}  {entry['color']}")
+        return
+
+    # Генерация
+    r, g, b = random_rgb()
+    color_data = {
+        "hex": rgb_to_hex(r, g, b),
+        "rgb": f"({r},{g},{b})",
+        "hsl": f"({rgb_to_hsl(r,g,b)[0]:.1f}°, {rgb_to_hsl(r,g,b)[1]:.1f}%, {rgb_to_hsl(r,g,b)[2]:.1f}%)"
+    }
+    if args.palette:
+        palette_func = PALETTE_FUNCS[args.palette]
+        colors = palette_func(r, g, b, args.count)
+        # Покажем все цвета
+        print(f"\n🎨 Палитра '{args.palette}':")
+        for i, (cr, cg, cb) in enumerate(colors):
+            hex_c = rgb_to_hex(cr, cg, cb)
+            print(f"{i+1}. {hex_c}  RGB({cr},{cg},{cb})")
+        # Экспорт
+        if args.export:
+            if not args.output:
+                args.output = f"palette.{args.export}"
+            if args.export == 'css':
+                export_css(colors, args.output)
+            elif args.export == 'json':
+                export_json(colors, args.output)
+            else:
+                export_text(colors, args.output)
+            print(f"Экспортировано в {args.output}")
+        # Сохраняем в историю как палитру
+        add_to_history({
+            "date": datetime.now().isoformat(),
+            "color": f"Палитра {args.palette}",
+            "colors": [rgb_to_hex(cr, cg, cb) for cr, cg, cb in colors]
+        })
+    else:
+        # Одиночный цвет
+        hex_color = rgb_to_hex(r, g, b)
+        hsl = rgb_to_hsl(r, g, b)
+        if args.hex or (not args.rgb and not args.hsl):
+            print(f"HEX: {hex_color}")
+        if args.rgb or (not args.hex and not args.hsl):
+            print(f"RGB: ({r},{g},{b})")
+        if args.hsl or (not args.hex and not args.rgb):
+            print(f"HSL: ({hsl[0]:.1f}°, {hsl[1]:.1f}%, {hsl[2]:.1f}%)")
+        # Сохраняем в историю
+        add_to_history({
+            "date": datetime.now().isoformat(),
+            "color": hex_color,
+            "rgb": f"({r},{g},{b})",
+            "hsl": f"({hsl[0]:.1f}°, {hsl[1]:.1f}%, {hsl[2]:.1f}%)"
+        })
+
+# ========== GUI ==========
+if GUI_AVAILABLE:
+    class ColorGeneratorGUI:
+        def __init__(self, root):
+            self.root = root
+            self.root.title("🎨 Генератор цветов")
+            self.root.geometry("600x500")
+            self.root.resizable(True, True)
+            self.history = load_history()
+            self.current_color = (0,0,0)
+            self.create_widgets()
+            self.generate_random()
+
+        def create_widgets(self):
+            main = ttk.Frame(self.root, padding="10")
+            main.pack(fill=tk.BOTH, expand=True)
+
+            # Отображение цвета
+            self.color_preview = tk.Canvas(main, width=200, height=100, bg="white")
+            self.color_preview.pack(pady=10)
+
+            # Информация о цвете
+            self.info_label = ttk.Label(main, text="", font=("Arial", 12))
+            self.info_label.pack(pady=5)
+
+            # Кнопки
+            btn_frame = ttk.Frame(main)
+            btn_frame.pack(pady=10)
+            ttk.Button(btn_frame, text="🎲 Случайный", command=self.generate_random).pack(side=tk.LEFT, padx=5)
+            ttk.Button(btn_frame, text="💾 Сохранить", command=self.save_color).pack(side=tk.LEFT, padx=5)
+            ttk.Button(btn_frame, text="📋 История", command=self.show_history).pack(side=tk.LEFT, padx=5)
+
+            # Палитры
+            palette_frame = ttk.LabelFrame(main, text="Палитры")
+            palette_frame.pack(fill=tk.X, pady=10)
+            ttk.Button(palette_frame, text="Монохромная", command=lambda: self.generate_palette('mono')).pack(side=tk.LEFT, padx=5)
+            ttk.Button(palette_frame, text="Аналоговая", command=lambda: self.generate_palette('analog')).pack(side=tk.LEFT, padx=5)
+            ttk.Button(palette_frame, text="Комплементарная", command=lambda: self.generate_palette('comp')).pack(side=tk.LEFT, padx=5)
+            ttk.Button(palette_frame, text="Триадная", command=lambda: self.generate_palette('triad')).pack(side=tk.LEFT, padx=5)
+
+            # Экспорт
+            export_frame = ttk.LabelFrame(main, text="Экспорт")
+            export_frame.pack(fill=tk.X, pady=10)
+            ttk.Button(export_frame, text="CSS", command=lambda: self.export_color('css')).pack(side=tk.LEFT, padx=5)
+            ttk.Button(export_frame, text="JSON", command=lambda: self.export_color('json')).pack(side=tk.LEFT, padx=5)
+            ttk.Button(export_frame, text="TXT", command=lambda: self.export_color('txt')).pack(side=tk.LEFT, padx=5)
+
+        def generate_random(self):
+            r, g, b = random_rgb()
+            self.current_color = (r, g, b)
+            self.update_display(r, g, b)
+
+        def update_display(self, r, g, b):
+            hex_color = rgb_to_hex(r, g, b)
+            hsl = rgb_to_hsl(r, g, b)
+            self.color_preview.config(bg=hex_color)
+            self.info_label.config(text=f"HEX: {hex_color}  RGB: ({r},{g},{b})  HSL: ({hsl[0]:.1f}°, {hsl[1]:.1f}%, {hsl[2]:.1f}%)")
+            self.current_color = (r, g, b)
+
+        def generate_palette(self, scheme):
+            r, g, b = self.current_color
+            func = PALETTE_FUNCS[scheme]
+            colors = func(r, g, b, 5)
+            # Показываем в новом окне
+            win = tk.Toplevel(self.root)
+            win.title(f"Палитра {scheme}")
+            win.geometry("400x300")
+            for i, (cr, cg, cb) in enumerate(colors):
+                hex_c = rgb_to_hex(cr, cg, cb)
+                frame = tk.Frame(win, bg=hex_c, height=50)
+                frame.pack(fill=tk.X, pady=2)
+                tk.Label(frame, text=hex_c, bg=hex_c, fg="white" if (cr*0.299 + cg*0.587 + cb*0.114) < 186 else "black").pack(side=tk.LEFT, padx=10)
+            ttk.Button(win, text="Экспорт CSS", command=lambda: export_css(colors, "palette.css")).pack(pady=10)
+
+        def save_color(self):
+            r, g, b = self.current_color
+            hex_color = rgb_to_hex(r, g, b)
+            add_to_history({
+                "date": datetime.now().isoformat(),
+                "color": hex_color,
+                "rgb": f"({r},{g},{b})",
+                "hsl": f"({rgb_to_hsl(r,g,b)[0]:.1f}°, {rgb_to_hsl(r,g,b)[1]:.1f}%, {rgb_to_hsl(r,g,b)[2]:.1f}%)"
+            })
+            messagebox.showinfo("Сохранено", "Цвет сохранён в историю.")
+
+        def show_history(self):
+            history = load_history()
+            if not history:
+                messagebox.showinfo("История", "История пуста.")
+                return
+            win = tk.Toplevel(self.root)
+            win.title("История цветов")
+            win.geometry("500x400")
+            text = scrolledtext.ScrolledText(win, wrap=tk.WORD)
+            text.pack(fill=tk.BOTH, expand=True)
+            for entry in history[-20:]:
+                text.insert(tk.END, f"{entry['date'][:19]}  {entry['color']}\n")
+            text.config(state='disabled')
+
+        def export_color(self, fmt):
+            r, g, b = self.current_color
+            colors = [(r, g, b)]
+            filename = f"color.{fmt}"
+            if fmt == 'css':
+                export_css(colors, filename)
+            elif fmt == 'json':
+                export_json(colors, filename)
+            else:
+                export_text(colors, filename)
+            messagebox.showinfo("Экспорт", f"Экспортировано в {filename}")
+
+if __name__ == "__main__":
+    cli()
